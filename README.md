@@ -1,7 +1,5 @@
 # Agentic-ops-copilot
 
-# agentic-ops-copilot
-
 **Agentic AI Operations Copilot** — an AI agent for on-call/support engineers that triages a ticket, gathers logs/metrics/service context in parallel, and drafts a grounded root-cause hypothesis instead of a human doing it manually across five tabs.
 
 ## Summary
@@ -11,6 +9,8 @@ Given an incoming ticket or alert, the copilot classifies severity and category,
 ```
 Ticket -> Triage -> [Logs | Metrics | Service Context] (parallel) -> Synthesize -> Root-cause summary
 ```
+<img width="743" height="401" alt="Image" src="https://github.com/user-attachments/assets/e9c500ce-2790-4719-b094-760bc33f1648" />
+
 Built as a LangGraph state machine (`StateGraph`) with each stage as a node and tool calls wrapping real ops systems (CloudWatch/Splunk-style log summarization, metrics APIs, service-ownership lookup).
 
 ## Stack
