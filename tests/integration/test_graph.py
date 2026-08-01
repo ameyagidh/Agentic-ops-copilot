@@ -1,7 +1,9 @@
 import pytest
 
+import ops_copilot.graph as graph_module
 from ops_copilot.graph import build_graph, close_graph
 from ops_copilot.schemas import IncidentRequest
+from ops_copilot.tools.base import BackendError
 
 
 @pytest.mark.asyncio
@@ -32,6 +34,42 @@ async def test_full_run_grounded_scenario(settings_factory):
     assert finding.insufficient_evidence is False
     assert finding.hypotheses
     assert set(finding.evidence_refs) <= {"logs", "metrics", "context", "runbooks"}
+
+
+@pytest.mark.asyncio
+async def test_backend_error_degrades_gracefully_instead_of_crashing_the_run(settings_factory, monkeypatch):
+    """A real backend (e.g. Prometheus) timing out must not take down the
+    whole incident analysis — the run should still complete, the other
+    evidence sources should still be collected, and the failed source must
+    be recorded as `degraded` (not silently treated as "not relevant").
+    """
+
+    class _FailingMetricsBackend:
+        async def query(self, service_name: str):
+            raise BackendError("simulated timeout talking to Prometheus")
+
+    monkeypatch.setattr(graph_module, "get_metrics_backend", lambda settings: _FailingMetricsBackend())
+
+    settings = settings_factory()
+    graph = await build_graph(settings)
+    try:
+        result = await graph.ainvoke(
+            {
+                "incident": IncidentRequest(
+                    ticket_text="Payments API is timing out for ~6% of requests since the last deploy.",
+                    service_name="payments-api",
+                )
+            },
+            config={"configurable": {"thread_id": "degraded"}},
+        )
+    finally:
+        await close_graph(graph)
+
+    assert result["metrics"] is None
+    assert result["degraded"] == ["metrics"]
+    assert result["logs"] is not None
+    assert result["context"] is not None
+    assert "metrics" not in result["finding"].evidence_refs
 
 
 @pytest.mark.asyncio

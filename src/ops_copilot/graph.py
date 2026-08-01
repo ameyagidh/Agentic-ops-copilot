@@ -17,8 +17,9 @@ race to overwrite the same keys.
 
 from __future__ import annotations
 
+import operator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 from weakref import WeakKeyDictionary
 
 from langgraph.graph import END, StateGraph
@@ -26,6 +27,7 @@ from langgraph.graph import END, StateGraph
 from ops_copilot.config import Settings, get_settings
 from ops_copilot.guardrails import validate_finding
 from ops_copilot.llm import get_chat_model
+from ops_copilot.observability import get_logger
 from ops_copilot.retrieval import get_runbook_store
 from ops_copilot.schemas import (
     Category,
@@ -38,7 +40,10 @@ from ops_copilot.schemas import (
     Severity,
     Triage,
 )
+from ops_copilot.tools.base import BackendError
 from ops_copilot.tools.registry import get_logs_backend, get_metrics_backend, get_service_catalog
+
+logger = get_logger(__name__)
 
 # Categories where log/metric evidence is unlikely to be useful — the router
 # skips those branches entirely rather than fetching evidence nobody needs.
@@ -57,6 +62,12 @@ class OpsState(TypedDict, total=False):
     runbooks: list[RunbookExcerpt]
     finding: Finding
     retry_count: int
+    # Sources that were *attempted* but failed with a BackendError (real
+    # backend down/timeout), as distinct from sources the router decided not
+    # to collect at all. Multiple fetch_* nodes can append to this
+    # concurrently, so — unlike the other keys above — it needs a reducer
+    # rather than a disjoint per-node key.
+    degraded: Annotated[list[str], operator.add]
 
 
 def _triage_ticket(ticket_text: str) -> Triage:
@@ -117,19 +128,34 @@ def _route_condition(state: OpsState) -> list[str]:
 
 async def fetch_logs_node(state: OpsState, settings: Settings) -> dict[str, Any]:
     backend = get_logs_backend(settings)
-    logs = await backend.summarize(state["incident"].service_name, window_minutes=30)
+    service_name = state["incident"].service_name
+    try:
+        logs = await backend.summarize(service_name, window_minutes=30)
+    except BackendError as exc:
+        logger.error("logs_backend_unavailable", service_name=service_name, error=str(exc))
+        return {"logs": None, "degraded": ["logs"]}
     return {"logs": logs}
 
 
 async def fetch_metrics_node(state: OpsState, settings: Settings) -> dict[str, Any]:
     backend = get_metrics_backend(settings)
-    metrics = await backend.query(state["incident"].service_name)
+    service_name = state["incident"].service_name
+    try:
+        metrics = await backend.query(service_name)
+    except BackendError as exc:
+        logger.error("metrics_backend_unavailable", service_name=service_name, error=str(exc))
+        return {"metrics": None, "degraded": ["metrics"]}
     return {"metrics": metrics}
 
 
 async def fetch_context_node(state: OpsState, settings: Settings) -> dict[str, Any]:
     catalog = get_service_catalog(settings)
-    context = await catalog.lookup(state["incident"].service_name)
+    service_name = state["incident"].service_name
+    try:
+        context = await catalog.lookup(service_name)
+    except BackendError as exc:
+        logger.error("service_catalog_unavailable", service_name=service_name, error=str(exc))
+        return {"context": None, "degraded": ["context"]}
     return {"context": context}
 
 
@@ -140,11 +166,22 @@ async def retrieve_runbooks_node(state: OpsState, settings: Settings) -> dict[st
     return {"runbooks": runbooks}
 
 
+def _unavailable_reason(key: str, state: OpsState) -> str:
+    """Distinguishes "the router decided this wasn't relevant" from "we
+    tried to fetch it and the backend failed" — an on-call engineer needs to
+    know which one happened, and the model must not treat a backend outage
+    as a clean absence of evidence.
+    """
+    if key in (state.get("degraded") or []):
+        return "unavailable — backend error while fetching this evidence"
+    return "none — not collected for this category"
+
+
 def _format_evidence(state: OpsState) -> str:
     lines = []
     lines.append(f"Triage: severity={state['triage'].severity}, category={state['triage'].category}")
     logs = state.get("logs")
-    lines.append(f"Logs: {logs.summary if logs else 'none — not collected for this category'}")
+    lines.append(f"Logs: {logs.summary if logs else _unavailable_reason('logs', state)}")
     metrics = state.get("metrics")
     if metrics:
         lines.append(
@@ -153,7 +190,7 @@ def _format_evidence(state: OpsState) -> str:
             f"error rate {metrics.error_rate_pct:.1f}%, throughput {metrics.throughput_rps:.0f} rps"
         )
     else:
-        lines.append("Metrics: none — not collected for this category")
+        lines.append(f"Metrics: {_unavailable_reason('metrics', state)}")
     context = state.get("context")
     if context:
         lines.append(
@@ -161,7 +198,7 @@ def _format_evidence(state: OpsState) -> str:
             f"{context.recent_change_summary or 'no recent deploy on record'}"
         )
     else:
-        lines.append("Service context: none")
+        lines.append(f"Service context: {_unavailable_reason('context', state)}")
     runbooks = state.get("runbooks") or []
     if runbooks:
         lines.append("Runbooks:")

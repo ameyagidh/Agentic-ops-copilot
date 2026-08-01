@@ -20,6 +20,7 @@ Runs **fully offline out of the box** — zero API keys, zero external services 
 - [Testing](#testing)
 - [Project layout](#project-layout)
 - [Troubleshooting](#troubleshooting)
+- [Full project documentation](docs/PROJECT_DOCUMENTATION.md) — everything done in this project, in depth
 
 ## Why it matters
 
@@ -130,8 +131,11 @@ Everything is an environment variable prefixed `OPS_` (or a line in `.env` — s
 | `OPS_METRICS_BACKEND` | `mock` | `mock`, `prometheus` |
 | `OPS_RETRIEVAL_ENABLED` | `true` | `true`, `false` |
 | `OPS_EMBEDDINGS_PROVIDER` | `none` | `none` (in-memory store), `openai` (real Chroma vectors) |
-| `OPS_API_KEY` | *(unset)* | set any value to require `X-API-Key` on every API request |
+| `OPS_API_KEY` | *(unset)* | set any value to require `X-API-Key` on every `/api/v1/*` request |
+| `OPS_RATE_LIMIT_PER_MINUTE` | `60` | per-client-IP, per-worker (see note below) |
 | `OPS_CHECKPOINT_DB_PATH` | `data/checkpoints.sqlite` | path to the run/checkpoint SQLite file |
+
+**Rate limiting** is an in-process sliding window keyed by client IP — simple and dependency-free, but per-worker rather than global: with multiple uvicorn workers or replicas, each enforces the limit independently. `/healthz` and `/readyz` are exempt so liveness/readiness probes are never rate-limited under load. Exceeding the limit returns `429` with `Retry-After: 60`.
 
 ## Using it
 
@@ -221,12 +225,12 @@ make lint       # ruff check + format --check
 make typecheck  # mypy
 ```
 
-The suite (36 tests, ~87% coverage) runs fully offline against the `fake` LLM provider and `mock` backends — no API keys or network access required. It includes:
+The suite (39 tests, ~86% coverage) runs fully offline against the `fake` LLM provider and `mock` backends — no API keys or network access required. It includes:
 
 - A **zero-env import regression test** — the original prototype crashed on `import` without `OPENAI_API_KEY`; this test proves the package now imports and builds the graph in a completely scrubbed environment.
 - Unit tests for config, the fake model's structured output (both the grounded and insufficient-evidence paths), guardrail enforcement, mock backends, and retrieval.
-- Integration tests running the full graph end-to-end across multiple scenarios, including the parallel evidence fan-out and the router skipping irrelevant evidence sources.
-- API tests (FastAPI `TestClient`-style, via `httpx.ASGITransport`) covering every endpoint, SSE streaming, auth, and history.
+- Integration tests running the full graph end-to-end across multiple scenarios, including the parallel evidence fan-out, the router skipping irrelevant evidence sources, and a simulated backend failure that must degrade gracefully rather than crash the run.
+- API tests (FastAPI `TestClient`-style, via `httpx.ASGITransport`) covering every endpoint, SSE streaming, auth, rate limiting, and history.
 - Real-adapter tests (Prometheus/Loki) against `httpx` mock transports — no real network calls.
 
 **Honest limit:** with no `OPENAI_API_KEY` or AWS credentials configured, the real OpenAI/Bedrock code paths and genuinely live Prometheus/Loki calls are not exercised by this suite — only their request/response handling logic is, via mocks. Everything reported as tested here is the offline suite.
@@ -255,4 +259,6 @@ tests/               unit + integration tests
 
 - **`database is locked`**: two processes are writing to the same SQLite checkpoint file at once. Point `OPS_CHECKPOINT_DB_PATH` at separate files for separate processes (this is set automatically per-test).
 - **`ModuleNotFoundError: langchain_openai` / `langchain_aws` / `langchain_chroma`**: install the matching extra, e.g. `pip install -e ".[openai]"`.
-- **Dashboard shows nothing after clicking Analyze**: check the browser console and confirm `/api/v1/incidents/stream` returns `200` — if `OPS_API_KEY` is set, the dashboard doesn't currently send it (open access is intended for local/dev use only).
+- **Dashboard prompts for an API key**: this happens when `OPS_API_KEY` is set — the dashboard prompts once on the first `401`, then remembers the key in the browser's `localStorage` for subsequent requests. Clear it via your browser's dev tools if you need to re-enter it.
+- **`429 rate limit exceeded`**: you've hit `OPS_RATE_LIMIT_PER_MINUTE` for your client IP on this worker process; wait for the `Retry-After` window or raise the setting.
+- **A finding cites `logs`/`metrics`/`context` I didn't expect, or a source is missing with no explanation**: check `RunRecord.degraded` in the response — if the source is listed there, the real backend (Prometheus/Loki/etc.) failed or timed out during this run rather than being skipped by the router; the run still completes with whatever evidence *was* collected.

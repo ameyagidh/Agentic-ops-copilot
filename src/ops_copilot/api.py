@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,6 +107,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         return response
 
+    # In-process sliding-window rate limit, keyed by client IP. This is
+    # per-worker, not global — fine for a single-process deployment, but
+    # under multiple uvicorn workers or replicas each enforces its own
+    # limit independently (documented in README/`.env.example`; adding a
+    # shared store like Redis is out of scope for this project's size).
+    _request_log: dict[str, deque] = defaultdict(deque)
+
+    @app.middleware("http")
+    async def rate_limit(request: Request, call_next):
+        if request.url.path in ("/healthz", "/readyz"):
+            return await call_next(request)
+        limit = settings.rate_limit_per_minute
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        window = _request_log[client_ip]
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "rate limit exceeded"},
+                headers={"Retry-After": "60"},
+            )
+        window.append(now)
+        return await call_next(request)
+
     async def _run_incident(app: FastAPI, incident: IncidentRequest) -> RunRecord:
         record = _new_run_record(incident)
         record.status = "running"
@@ -121,6 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record.context = result.get("context")
             record.runbooks = result.get("runbooks", [])
             record.finding = result.get("finding")
+            record.degraded = result.get("degraded", [])
             record.status = "completed"
             REQUESTS_TOTAL.labels(status="completed").inc()
         except Exception as exc:  # noqa: BLE001 - guardrail: never crash the API on a bad run
@@ -161,6 +189,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         for key in ("triage", "logs", "metrics", "context", "runbooks", "finding"):
                             if key in delta:
                                 setattr(record, key, delta[key])
+                        # `degraded` is written incrementally by concurrent
+                        # fetch_* nodes (see graph.py's reducer) — each
+                        # "updates" chunk carries only that node's own
+                        # contribution, so accumulate rather than overwrite.
+                        if "degraded" in delta:
+                            record.degraded = [*record.degraded, *delta["degraded"]]
                 record.status = "completed"
                 REQUESTS_TOTAL.labels(status="completed").inc()
             except Exception as exc:  # noqa: BLE001

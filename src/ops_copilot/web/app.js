@@ -7,6 +7,30 @@ const resultBody = document.getElementById("result-body");
 const historyBody = document.querySelector("#history-table tbody");
 const refreshBtn = document.getElementById("refresh-btn");
 
+const API_KEY_STORAGE_KEY = "ops_copilot_api_key";
+
+// If OPS_API_KEY is configured server-side, every /api/v1/* call needs an
+// X-API-Key header — the dashboard has no other way to authenticate. We
+// store the key in localStorage after the first prompt rather than baking
+// a secret into the served JS.
+function authHeaders() {
+  const key = localStorage.getItem(API_KEY_STORAGE_KEY);
+  return key ? { "X-API-Key": key } : {};
+}
+
+async function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}), ...authHeaders() };
+  let response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    const key = window.prompt("This server requires an API key. Enter it:");
+    if (key) {
+      localStorage.setItem(API_KEY_STORAGE_KEY, key);
+      response = await fetch(url, { ...options, headers: { ...headers, "X-API-Key": key } });
+    }
+  }
+  return response;
+}
+
 const NODE_LABELS = {
   route: "Routing & triage",
   fetch_logs: "Fetching logs",
@@ -35,13 +59,14 @@ function renderFinding(record) {
     ${hyps ? `<ul class="evidence-list">${hyps}</ul>` : ""}
     ${finding.recommended_action ? `<p><strong>Recommended action:</strong> ${finding.recommended_action}</p>` : ""}
     ${finding.evidence_refs && finding.evidence_refs.length ? `<p><strong>Evidence used:</strong> ${finding.evidence_refs.join(", ")}</p>` : ""}
+    ${record.degraded && record.degraded.length ? `<p class="explanation">Unavailable due to a backend error: ${record.degraded.join(", ")}</p>` : ""}
     <p class="explanation">${finding.explanation || ""}</p>
   `;
 }
 
 async function loadHistory() {
   try {
-    const res = await fetch("/api/v1/incidents?limit=25");
+    const res = await apiFetch("/api/v1/incidents?limit=25");
     if (!res.ok) return;
     const runs = await res.json();
     historyBody.innerHTML = runs
@@ -80,7 +105,7 @@ form.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("/api/v1/incidents/stream", {
+    const response = await apiFetch("/api/v1/incidents/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

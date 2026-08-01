@@ -121,6 +121,35 @@ async def test_stream_endpoint_emits_node_and_completed_events(client):
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_returns_429_once_exceeded(settings_factory):
+    settings = settings_factory(rate_limit_per_minute=2)
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            first = await c.get("/api/v1/incidents")
+            second = await c.get("/api/v1/incidents")
+            third = await c.get("/api/v1/incidents")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert third.headers["retry-after"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_exempts_health_probes(settings_factory):
+    settings = settings_factory(rate_limit_per_minute=1)
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            for _ in range(5):
+                resp = await c.get("/healthz")
+                assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_auth_required_when_api_key_configured(settings_factory):
     settings = settings_factory(api_key="topsecret")
     app = create_app(settings)

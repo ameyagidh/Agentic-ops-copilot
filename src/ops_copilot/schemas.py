@@ -76,6 +76,10 @@ class RunRecord(BaseModel):
     context: ServiceContext | None = None
     runbooks: list[RunbookExcerpt] = Field(default_factory=list)
     finding: Finding | None = None
+    # Evidence sources that were attempted but failed with a backend error
+    # (real backend down/timeout) — distinct from sources the router simply
+    # decided weren't relevant to this incident category.
+    degraded: list[str] = Field(default_factory=list)
     error: str | None = None
     created_at: str
     updated_at: str
