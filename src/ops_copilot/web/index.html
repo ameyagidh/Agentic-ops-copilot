@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentic Ops Copilot</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Agentic Ops Copilot</h1>
+    <p class="subtitle">Triage a ticket, watch the graph gather evidence live, get a grounded root-cause hypothesis.</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>New incident</h2>
+      <form id="incident-form">
+        <label for="service">Service name</label>
+        <input id="service" name="service" placeholder="checkout-api" required />
+
+        <label for="ticket">Ticket / alert text</label>
+        <textarea id="ticket" name="ticket" rows="3"
+          placeholder="Checkout API is timing out for ~6% of requests since the last deploy."
+          required></textarea>
+
+        <button type="submit" id="submit-btn">Analyze</button>
+      </form>
+    </section>
+
+    <section class="card" id="progress-card" hidden>
+      <h2>Progress</h2>
+      <ol id="progress-list"></ol>
+    </section>
+
+    <section class="card" id="result-card" hidden>
+      <h2>Finding</h2>
+      <div id="result-body"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Run history</h2>
+        <button id="refresh-btn" type="button">Refresh</button>
+      </div>
+      <table id="history-table">
+        <thead>
+          <tr><th>Run</th><th>Service</th><th>Severity</th><th>Status</th><th>Confidence</th><th>When</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    <span>Agentic Ops Copilot — offline mode uses a deterministic fake model and mock backends by default.</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

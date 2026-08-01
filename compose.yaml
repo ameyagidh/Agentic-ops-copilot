@@ -1,0 +1,39 @@
+services:
+  ops-copilot:
+    build: .
+    image: ops-copilot:local
+    ports:
+      - "8000:8000"
+    environment:
+      OPS_LLM_PROVIDER: ${OPS_LLM_PROVIDER:-fake}
+      OPS_LOGS_BACKEND: ${OPS_LOGS_BACKEND:-mock}
+      OPS_METRICS_BACKEND: ${OPS_METRICS_BACKEND:-mock}
+      OPS_LOG_LEVEL: ${OPS_LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ops-copilot-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional: real backends to demo the Prometheus/Loki adapters against.
+  # Bring up with: docker compose --profile real-backends up
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["real-backends"]
+    ports:
+      - "9090:9090"
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["real-backends"]
+    ports:
+      - "3100:3100"
+
+volumes:
+  ops-copilot-data:
